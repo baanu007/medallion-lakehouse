@@ -132,6 +132,15 @@ def load_via_pandas(
 
     logger.info("Loaded %d rows from %s into pandas", len(pdf), gold_path)
 
+    # Snowflake DDL declares columns in UPPERCASE (the Snowflake default).
+    # ``write_pandas`` quotes identifiers when staging the COPY INTO, so
+    # lower-case pandas column names (which is what Delta hands us) end
+    # up as ``"customer_id"`` and don't match the unquoted UPPERCASE
+    # columns in the target table -> COPY INTO fails with
+    # ``invalid column name 'customer_id'``. Uppercasing the DataFrame
+    # columns here keeps the quoted identifiers aligned with the DDL.
+    pdf.columns = [c.upper() for c in pdf.columns]
+
     with snowflake.connector.connect(**config.as_connector_kwargs()) as conn:
         if mode == "overwrite":
             with conn.cursor() as cur:
