@@ -1,8 +1,10 @@
 """
 Gold Layer: fact_orders.
 
-Joins cleansed Silver orders to the current row of ``dim_customer`` to
-attach the customer surrogate key, then produces:
+Joins cleansed Silver orders to ``dim_customer`` using a **temporal
+SCD2 join** to attach the customer surrogate key that was *active at the
+time the order was placed* (not necessarily the current attribute set),
+then produces:
 
 1. ``fact_orders`` - one row per order, partitioned by ``order_date``.
 2. ``agg_daily_sales`` - daily aggregations (gross / net / order_count) at
@@ -10,6 +12,15 @@ attach the customer surrogate key, then produces:
 
 The fact is upserted via Delta MERGE keyed on ``order_id`` so reruns are
 idempotent.
+
+Why temporal join, not ``is_current = TRUE``?
+    Filtering ``dim_customer`` to current rows before the join collapses
+    the SCD2 history into a Type 1 view and destroys the entire point of
+    maintaining versions: historical orders would be re-attributed to a
+    customer's *current* country/email instead of the values that were
+    true on the order date. The temporal predicate
+    ``order_date >= effective_from AND (order_date < effective_to OR effective_to IS NULL)``
+    picks the exact dim version active on each order's date.
 """
 
 from __future__ import annotations
@@ -49,18 +60,48 @@ class FactOrdersBuilder:
         return self.spark.read.format("delta").load(path)
 
     def build_fact(self) -> DataFrame:
-        """Join Silver orders to the current customer dimension row."""
+        """Join Silver orders to ``dim_customer`` using a temporal SCD2 join.
+
+        For each order we attach the customer surrogate key (and country)
+        for the dimension version that was *active on the order_date*:
+
+            o.order_date >= c.effective_from
+            AND (o.order_date < c.effective_to OR c.effective_to IS NULL)
+
+        This preserves the SCD2 history in the fact - historical orders
+        keep their historical attribution even after the customer's
+        current row changes.
+        """
         orders = self._read(self.silver_orders_path)
-        dim = (
-            self._read(self.dim_customer_path)
-            .filter(F.col("is_current") == True)  # noqa: E712
-            .select("customer_id", "customer_sk", "country")
+        # NOTE: we deliberately do NOT filter to ``is_current = TRUE``
+        # here. We need every version of every customer so the temporal
+        # predicate below can pick the row that was active on the
+        # order_date.
+        dim = self._read(self.dim_customer_path).select(
+            "customer_id",
+            "customer_sk",
+            "country",
+            "effective_from",
+            "effective_to",
         )
 
-        # Left join so we never lose an order if the dimension is late.
+        # Cast order_date to timestamp so the comparison against
+        # effective_from / effective_to (timestamps) is well-defined
+        # regardless of whether order_date arrives as date or timestamp.
+        temporal_predicate = (
+            (F.col("o.customer_id") == F.col("c.customer_id"))
+            & (F.col("o.order_date").cast("timestamp") >= F.col("c.effective_from"))
+            & (
+                (F.col("o.order_date").cast("timestamp") < F.col("c.effective_to"))
+                | F.col("c.effective_to").isNull()
+            )
+        )
+
+        # Left join so we never lose an order if the dimension is late
+        # or if no version of the customer covers the order_date.
         fact = (
             orders.alias("o")
-            .join(dim.alias("c"), on="customer_id", how="left")
+            .join(dim.alias("c"), on=temporal_predicate, how="left")
             .select(
                 F.col("o.order_id"),
                 F.col("o.customer_id"),
