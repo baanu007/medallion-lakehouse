@@ -1,7 +1,9 @@
 pyspark==3.5.0
-delta-spark==2.4.0
+delta-spark==3.1.0
+snowflake-connector-python==3.6.0
 pandas==2.1.4
 PyYAML==6.0.1
-great-expectations==0.18.8
-snowflake-connector-python==3.6.0
 python-dotenv==1.0.0
+pytest==8.0.0
+chispa==0.9.4
+flake8==7.0.0

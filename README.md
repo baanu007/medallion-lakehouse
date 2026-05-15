@@ -7,6 +7,10 @@ A complete data lakehouse implementation using the **Medallion Architecture** (B
 ![Snowflake](https://img.shields.io/badge/Snowflake-29B5E8?style=for-the-badge&logo=snowflake&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
 
+![Architecture](screenshots/architecture.png)
+
+> Diagram lives at `screenshots/architecture.png` (see `screenshots/architecture.md` for what it depicts; export from draw.io / Excalidraw to that path).
+
 ## 📋 Overview
 
 This project implements a production-grade Medallion Architecture that provides:
@@ -83,33 +87,25 @@ This project implements a production-grade Medallion Architecture that provides:
 medallion-lakehouse/
 ├── src/
 │   ├── bronze/
-│   │   ├── ingest_orders.py
-│   │   ├── ingest_customers.py
-│   │   └── ingest_products.py
+│   │   └── ingest_orders.py        # CSV/JSON -> Bronze Delta + audit cols
 │   ├── silver/
-│   │   ├── clean_orders.py
-│   │   ├── clean_customers.py
-│   │   └── clean_products.py
+│   │   ├── clean_orders.py         # Dedup, clean, MERGE upsert
+│   │   └── clean_customers.py
 │   ├── gold/
-│   │   ├── dim_customers.py
-│   │   ├── dim_products.py
-│   │   ├── dim_date.py
-│   │   ├── fct_sales.py
-│   │   └── agg_daily_sales.py
-│   └── utils/
-│       ├── delta_utils.py
-│       ├── quality_checks.py
-│       └── config.py
-├── notebooks/
-│   ├── 01_bronze_exploration.ipynb
-│   ├── 02_silver_transformations.ipynb
-│   └── 03_gold_analytics.ipynb
-├── tests/
-│   ├── test_bronze.py
-│   ├── test_silver.py
-│   └── test_gold.py
-├── config/
-│   └── pipeline_config.yaml
+│   │   ├── dim_customer.py         # SCD Type 2 customer dimension
+│   │   └── fact_orders.py          # Order-grain fact + daily aggregates
+│   ├── common/
+│   │   ├── spark_session.py        # Delta-enabled SparkSession builder
+│   │   └── io_utils.py             # read / write / merge Delta helpers
+│   └── snowflake/
+│       └── load_to_snowflake.py    # Gold -> Snowflake loader
+├── sql/
+│   └── snowflake_ddl.sql           # DIM_CUSTOMER, FACT_ORDERS, AGG_DAILY_SALES
+├── data/
+│   └── sample/                     # ~500 rows of synthetic orders/customers
+├── tests/                          # pytest suite (local Spark, no AWS/SF)
+├── screenshots/                    # architecture.png lives here
+├── .github/workflows/ci.yml        # lint + pytest on every PR
 ├── requirements.txt
 └── README.md
 ```
@@ -141,15 +137,60 @@ pip install -r requirements.txt
 ### Run Pipeline
 
 ```bash
-# Bronze: Ingest raw data
-python src/bronze/ingest_orders.py
+# Bronze: Ingest raw orders
+python -m src.bronze.ingest_orders \
+    --source-path data/sample/orders.csv \
+    --bronze-path ./_lake/bronze/orders \
+    --format csv
 
-# Silver: Clean and transform
-python src/silver/clean_orders.py
+# Silver: Clean orders + customers
+python -m src.silver.clean_orders
+python -m src.silver.clean_customers \
+    --bronze-path ./_lake/bronze/customers \
+    --silver-path ./_lake/silver/customers
 
-# Gold: Create aggregates
-python src/gold/fct_sales.py
+# Gold: Build the SCD2 dim and the fact + daily agg
+python -m src.gold.dim_customer \
+    --silver-path ./_lake/silver/customers \
+    --gold-path ./_lake/gold/dim_customer
+python -m src.gold.fact_orders \
+    --silver-orders-path ./_lake/silver/orders \
+    --dim-customer-path ./_lake/gold/dim_customer \
+    --gold-fact-path ./_lake/gold/fact_orders \
+    --gold-agg-path ./_lake/gold/agg_daily_sales
+
+# Snowflake: load a Gold table (creds via env vars)
+python -m src.snowflake.load_to_snowflake \
+    --gold-path ./_lake/gold/dim_customer \
+    --table DIM_CUSTOMER
 ```
+
+## 📦 Data Source
+
+This repo ships with deterministic synthetic data under `data/sample/` so the
+pipeline is runnable locally without any cloud credentials:
+
+| File                          | Rows | Description                              |
+| ----------------------------- | ---- | ---------------------------------------- |
+| `data/sample/orders.csv`      | 500  | Bronze-shaped orders with audit columns  |
+| `data/sample/customers.csv`   | 100  | Bronze-shaped customers                  |
+
+Regenerate or scale up via `python data/sample/generate_sample_data.py`.
+
+For a realistic-scale public dataset, point the Bronze ingestor at the
+[Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce)
+on Kaggle - schemas align closely with the orders/customers model used here.
+
+## 🧪 Tests
+
+```bash
+pip install -r requirements.txt
+pytest -ra tests/
+```
+
+Tests run against a local Spark session with Delta enabled - no AWS or
+Snowflake access is required. CI runs the same suite on every PR via
+`.github/workflows/ci.yml`.
 
 ## 📊 Delta Lake Features Used
 
@@ -243,11 +284,15 @@ SELECT * FROM table_changes('delta.`/path/to/table`', 10);
 
 | Layer | Technology | Purpose |
 |-------|------------|---------|
-| Storage | Delta Lake | ACID transactions, versioning |
-| Processing | PySpark | Distributed transformations |
-| Orchestration | Airflow/Dagster | Pipeline scheduling |
-| Warehouse | Snowflake | Analytics queries |
-| Quality | Great Expectations | Data validation |
+| Storage | Delta Lake 3.1 | ACID transactions, versioning, time travel |
+| Processing | PySpark 3.5 | Distributed transformations |
+| Warehouse | Snowflake | Analytics queries (Gold tables) |
+| Testing | pytest + local Spark | Unit + integration tests |
+| CI | GitHub Actions | Lint (flake8) + tests on every PR |
+
+Orchestration (Airflow/Dagster) is intentionally **not** included in this
+repo - the jobs are designed as standalone entry points so any scheduler can
+drive them.
 
 ## 📄 License
 
