@@ -22,6 +22,23 @@ from datetime import date
 import pytest
 from pyspark.sql import Row
 from pyspark.sql import functions as F
+from pyspark.sql.types import StructType, StructField, StringType
+
+
+# Explicit schema for the change-condition tests. Required because some
+# parametrized cases pass all-NULL columns to ``createDataFrame`` and Spark
+# 3.5 on Linux cannot infer types from all-None columns
+# (``CANNOT_DETERMINE_TYPE``). Windows happened to work due to Spark version
+# quirks, but Linux CI fails without an explicit schema.
+_CHANGE_COND_SCHEMA = StructType(
+    [
+        StructField("customer_id", StringType(), True),
+        StructField("first_name", StringType(), True),
+        StructField("last_name", StringType(), True),
+        StructField("email", StringType(), True),
+        StructField("country", StringType(), True),
+    ]
+)
 
 from src.gold.dim_customer import (
     TRACKED_ATTRIBUTES,
@@ -145,10 +162,12 @@ def _build_change_condition() -> str:
 )
 def test_change_condition_null_semantics(spark, cur_country, inc_country, expected_change):
     cur = spark.createDataFrame(
-        [Row(customer_id="c1", first_name="A", last_name="L", email="a@x", country=cur_country)]
+        [Row(customer_id="c1", first_name="A", last_name="L", email="a@x", country=cur_country)],
+        schema=_CHANGE_COND_SCHEMA,
     ).alias("cur")
     inc = spark.createDataFrame(
-        [Row(customer_id="c1", first_name="A", last_name="L", email="a@x", country=inc_country)]
+        [Row(customer_id="c1", first_name="A", last_name="L", email="a@x", country=inc_country)],
+        schema=_CHANGE_COND_SCHEMA,
     ).alias("inc")
 
     joined = cur.join(inc, on="customer_id", how="inner")
@@ -165,10 +184,12 @@ def test_change_condition_null_semantics(spark, cur_country, inc_country, expect
 def test_change_condition_detects_email_change_with_other_nulls(spark):
     """A real change in one attr must still fire even when other attrs are NULL on both sides."""
     cur = spark.createDataFrame(
-        [Row(customer_id="c1", first_name=None, last_name=None, email="old@x", country=None)]
+        [Row(customer_id="c1", first_name=None, last_name=None, email="old@x", country=None)],
+        schema=_CHANGE_COND_SCHEMA,
     ).alias("cur")
     inc = spark.createDataFrame(
-        [Row(customer_id="c1", first_name=None, last_name=None, email="new@x", country=None)]
+        [Row(customer_id="c1", first_name=None, last_name=None, email="new@x", country=None)],
+        schema=_CHANGE_COND_SCHEMA,
     ).alias("inc")
     joined = cur.join(inc, on="customer_id", how="inner")
     assert joined.filter(_build_change_condition()).count() == 1
