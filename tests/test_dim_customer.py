@@ -16,6 +16,7 @@ expression that's hard to validate without a real evaluator.
 
 from __future__ import annotations
 
+import time
 from datetime import date
 
 import pytest
@@ -46,6 +47,39 @@ def _silver_row(
         email=email,
         country=country,
         signup_date=signup_date,
+    )
+
+
+def test_surrogate_key_cycle_stability(spark):
+    """A -> B -> A must produce three *distinct* surrogate keys.
+
+    Without ``effective_from`` in the hash input, the second ``A`` row
+    would collide with the original ``A`` row's SK and silently corrupt
+    the SCD2 history.
+    """
+    silver_a1 = spark.createDataFrame(
+        [_silver_row("c1", "Ann", "Lee", "ann@x.com", "US")]
+    )
+    sk_a1 = DimCustomerBuilder.build_new_versions(silver_a1).collect()[0].customer_sk
+
+    # Ensure effective_from advances (current_timestamp granularity is ms).
+    time.sleep(0.01)
+    silver_b = spark.createDataFrame(
+        [_silver_row("c1", "Ann", "Lee", "ann@x.com", "CA")]
+    )
+    sk_b = DimCustomerBuilder.build_new_versions(silver_b).collect()[0].customer_sk
+
+    time.sleep(0.01)
+    silver_a2 = spark.createDataFrame(
+        [_silver_row("c1", "Ann", "Lee", "ann@x.com", "US")]
+    )
+    sk_a2 = DimCustomerBuilder.build_new_versions(silver_a2).collect()[0].customer_sk
+
+    assert sk_a1 != sk_b, "A and B must hash to different surrogate keys"
+    assert sk_b != sk_a2, "B and second-A must differ"
+    assert sk_a1 != sk_a2, (
+        "Second A must NOT reuse the original A's surrogate key "
+        "(SCD2 cycle stability bug)."
     )
 
 

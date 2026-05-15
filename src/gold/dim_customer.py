@@ -58,18 +58,33 @@ class DimCustomerBuilder:
 
     @staticmethod
     def build_new_versions(silver_df: DataFrame) -> DataFrame:
-        """Project Silver into the dim_customer shape for new/changed rows."""
+        """Project Silver into the dim_customer shape for new/changed rows.
+
+        Surrogate key (``customer_sk``) is the SHA-256 of
+        ``customer_id || tracked_attrs || effective_from``. Including
+        ``effective_from`` in the hash ensures **cycle stability**: if a
+        customer's attributes go A -> B -> A, the second "A" version must
+        get a *new* surrogate key rather than collide with the original
+        "A" row (which is now expired). Without the timestamp component
+        the second A row would reuse the original SK and break the
+        SCD2 history join in ``fact_orders``.
+        """
+        # Materialize effective_from first so the same value flows into
+        # both the hash and the column.
+        with_eff = silver_df.select(
+            "customer_id",
+            *TRACKED_ATTRIBUTES,
+            "signup_date",
+        ).withColumn("effective_from", F.current_timestamp())
+
         hash_input = F.concat_ws(
-            "||", F.col("customer_id"), *[F.col(c) for c in TRACKED_ATTRIBUTES]
+            "||",
+            F.col("customer_id").cast("string"),
+            *[F.col(c).cast("string") for c in TRACKED_ATTRIBUTES],
+            F.col("effective_from").cast("string"),
         )
         return (
-            silver_df.select(
-                "customer_id",
-                *TRACKED_ATTRIBUTES,
-                "signup_date",
-            )
-            .withColumn("customer_sk", F.sha2(hash_input, 256))
-            .withColumn("effective_from", F.current_timestamp())
+            with_eff.withColumn("customer_sk", F.sha2(hash_input, 256))
             .withColumn("effective_to", F.lit(None).cast("timestamp"))
             .withColumn("is_current", F.lit(True))
         )
