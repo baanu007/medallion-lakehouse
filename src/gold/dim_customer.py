@@ -90,8 +90,23 @@ class DimCustomerBuilder:
         )
         incoming = new_versions.alias("inc")
 
+        # NULL-safe change detection. Plain ``cur.c <> inc.c`` evaluates
+        # to NULL whenever either side is NULL, and ``NULL OR x`` is
+        # itself NULL/falsy, so changes that involve NULLs (NULL -> value
+        # or value -> NULL) are silently missed. We use the SQL
+        # ``IS DISTINCT FROM`` semantics, expanded into Spark-compatible
+        # boolean logic: a change occurs when exactly one side is NULL,
+        # or when both are non-NULL and differ.
         change_condition = " OR ".join(
-            [f"cur.{c} <> inc.{c}" for c in TRACKED_ATTRIBUTES]
+            [
+                (
+                    f"((cur.{c} IS NULL AND inc.{c} IS NOT NULL) "
+                    f"OR (cur.{c} IS NOT NULL AND inc.{c} IS NULL) "
+                    f"OR (cur.{c} IS NOT NULL AND inc.{c} IS NOT NULL "
+                    f"AND cur.{c} <> inc.{c}))"
+                )
+                for c in TRACKED_ATTRIBUTES
+            ]
         )
 
         changed = (
