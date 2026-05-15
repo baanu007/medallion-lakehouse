@@ -1,22 +1,36 @@
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
 venv/
+.venv/
+env/
 .env
+.env.*
 
-# Spark
+# Spark / Delta
 *.jar
 metastore_db/
 spark-warehouse/
 derby.log
-
-# Delta
 _delta_log/
+*.crc
 
-# IDE
+# Data artifacts (don't commit raw / generated data dumps)
+*.parquet
+*.orc
+
+# IDE / OS
 .idea/
 .vscode/
 .ipynb_checkpoints/
-
-# OS
 .DS_Store
+Thumbs.db
